@@ -114,6 +114,8 @@ def ssh_retry(cmd: list[str], instance_id: str, max_attempts: int = 5) -> None:
 def create_vast_instance(
     gpu_type: str | None = None,
     instance_id: str | None = None,
+    repo_user: str | None = None,
+    repo_name: str | None = None,
     min_driver_version: str = "575.0.0",
     full_ssh_name: bool = False,
     instance_log_file: Path | None = None,
@@ -125,6 +127,8 @@ def create_vast_instance(
     Args:
         gpu_type: GPU type to search for (e.g., 'RTX_5090'). Mutually exclusive with instance_id.
         instance_id: Specific instance ID (8 digits). Mutually exclusive with gpu_type.
+        repo_user: GitHub username for repository to clone.
+        repo_name: GitHub repository name to clone.
         min_driver_version: Minimum GPU driver version required.
         full_ssh_name: If True, use full instance ID in SSH config name (vastXYZ..W).
                       If False, use last 2 digits (vastXY). Default: False.
@@ -453,15 +457,18 @@ def create_vast_instance(
     ssh_retry(gh_auth_cmd, created_instance_id)
 
     # Clone repository
-    print("Cloning repository...")
-    clone_cmd = [
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        ssh_config_name,
-        "gh repo clone TODO",
-    ]
-    ssh_retry(clone_cmd, created_instance_id)
+    if repo_user and repo_name:
+        print(f"Cloning repository {repo_user}/{repo_name}...")
+        clone_cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            ssh_config_name,
+            f"gh repo clone {repo_user}/{repo_name}",
+        ]
+        ssh_retry(clone_cmd, created_instance_id)
+    else:
+        print("No repository specified, skipping clone...")
 
     # Authenticate with HuggingFace
     print("Authenticating with HuggingFace...")
@@ -476,34 +483,43 @@ def create_vast_instance(
     ssh_retry(hf_auth_cmd, created_instance_id)
 
     # Install dependencies
-    print("Installing dependencies...")
-    install_deps_cmd = [
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        ssh_config_name,
-        "cd TODO && /root/.local/bin/uv sync",
-    ]
-    ssh_retry(install_deps_cmd, created_instance_id)
+    if repo_name:
+        print("Installing dependencies...")
+        install_deps_cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            ssh_config_name,
+            f"cd {repo_name} && /root/.local/bin/uv sync",
+        ]
+        ssh_retry(install_deps_cmd, created_instance_id)
+    else:
+        print("No repository specified, skipping dependency installation...")
 
     # Load gemma
-    print("Load gemma")
-    scp_cmd = ["scp", "scripts/load_gemma.py", f"{ssh_config_name}:"]
-    ssh_retry(scp_cmd, created_instance_id)
+    if repo_name:
+        print("Load gemma")
+        scp_cmd = ["scp", "scripts/load_gemma.py", f"{ssh_config_name}:"]
+        ssh_retry(scp_cmd, created_instance_id)
 
-    load_gemma_cmd = [
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        ssh_config_name,
-        "cd TODO && /root/.local/bin/uv run ../load_gemma.py",
-    ]
-    ssh_retry(load_gemma_cmd, created_instance_id)
+        load_gemma_cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            ssh_config_name,
+            f"cd {repo_name} && /root/.local/bin/uv run ../load_gemma.py",
+        ]
+        ssh_retry(load_gemma_cmd, created_instance_id)
+    else:
+        print("No repository specified, skipping load_gemma...")
 
     # Copy .env file to remote repository
-    print("Copying .env to remote repository...")
-    copy_env_cmd = ["scp", ".env", f"{ssh_config_name}:TODO/.env"]
-    ssh_retry(copy_env_cmd, created_instance_id)
+    if repo_name:
+        print("Copying .env to remote repository...")
+        copy_env_cmd = ["scp", ".env", f"{ssh_config_name}:{repo_name}/.env"]
+        ssh_retry(copy_env_cmd, created_instance_id)
+    else:
+        print("No repository specified, skipping .env copy...")
 
     # Copy pingme script if it exists locally
     pingme_path = Path.home() / ".local" / "bin" / "pingme"
@@ -545,9 +561,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python setup_vast.py --gpu RTX_5090
-  python setup_vast.py --gpu RTX_PRO_6000_WS
-  python setup_vast.py --id 28396515
+  python setup_vast.py --gpu RTX_5090 --repo user/repo-name
+  python setup_vast.py --gpu RTX_PRO_6000_WS --repo user/repo-name
+  python setup_vast.py --id 28396515 --repo user/repo-name
 
 Suggested GPU types: RTX_5090, RTX_PRO_6000_WS
         """,
@@ -558,6 +574,12 @@ Suggested GPU types: RTX_5090, RTX_PRO_6000_WS
         "--gpu", type=str, help="GPU type to search for (e.g., RTX_5090)"
     )
     group.add_argument("--id", type=str, help="Specific instance ID (8 digits)")
+
+    parser.add_argument(
+        "--repo",
+        type=str,
+        help="GitHub repository in format user/repo-name",
+    )
 
     parser.add_argument(
         "--min-driver-version",
@@ -574,10 +596,21 @@ Suggested GPU types: RTX_5090, RTX_PRO_6000_WS
 
     args = parser.parse_args()
 
+    # Parse repository if provided
+    repo_user = None
+    repo_name = None
+    if args.repo:
+        if "/" not in args.repo:
+            print("Error: --repo must be in format user/repo-name")
+            exit(1)
+        repo_user, repo_name = args.repo.split("/", 1)
+
     try:
         create_vast_instance(
             gpu_type=args.gpu,
             instance_id=args.id,
+            repo_user=repo_user,
+            repo_name=repo_name,
             min_driver_version=args.min_driver_version,
             full_ssh_name=args.full,
         )
