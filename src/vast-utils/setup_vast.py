@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import time
@@ -10,6 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -184,12 +189,12 @@ def create_vast_instance(
 
         print(f"Selected cheapest instance: {instance_search_id}")
 
-    # Load environment variables
+    # Load environment variables if .env exists
     env_file = Path(".env")
-    if not env_file.exists():
-        raise FileNotFoundError(".env file not found")
-
-    load_dotenv(env_file)
+    if env_file.exists():
+        load_dotenv(env_file)
+    else:
+        log.info(".env file not found, continuing without environment variables")
 
     # Create instance
     print("Creating instance...")
@@ -445,16 +450,19 @@ def create_vast_instance(
         )
 
     # Authenticate with GitHub
-    print("Authenticating with GitHub...")
     github_token = os.environ.get("GITHUB_TOKEN")
-    gh_auth_cmd = [
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        ssh_config_name,
-        f'echo "{github_token}" | gh auth login --with-token',
-    ]
-    ssh_retry(gh_auth_cmd, created_instance_id)
+    if github_token:
+        print("Authenticating with GitHub...")
+        gh_auth_cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            ssh_config_name,
+            f'echo "{github_token}" | gh auth login --with-token',
+        ]
+        ssh_retry(gh_auth_cmd, created_instance_id)
+    else:
+        log.info("No GITHUB_TOKEN found, skipping GitHub authentication (assuming public repo)")
 
     # Clone repository
     if repo_user and repo_name:
@@ -471,16 +479,19 @@ def create_vast_instance(
         print("No repository specified, skipping clone...")
 
     # Authenticate with HuggingFace
-    print("Authenticating with HuggingFace...")
     hf_token = os.environ.get("HF_TOKEN")
-    hf_auth_cmd = [
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        ssh_config_name,
-        f'/root/.local/bin/uvx hf auth login --token "{hf_token}"',
-    ]
-    ssh_retry(hf_auth_cmd, created_instance_id)
+    if hf_token:
+        print("Authenticating with HuggingFace...")
+        hf_auth_cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            ssh_config_name,
+            f'/root/.local/bin/uvx hf auth login --token "{hf_token}"',
+        ]
+        ssh_retry(hf_auth_cmd, created_instance_id)
+    else:
+        log.info("No HF_TOKEN found, skipping HuggingFace authentication")
 
     # Install dependencies
     if repo_name:
@@ -497,7 +508,8 @@ def create_vast_instance(
         print("No repository specified, skipping dependency installation...")
 
     # Load gemma
-    if repo_name:
+    hf_token = os.environ.get("HF_TOKEN")
+    if repo_name and hf_token:
         print("Load gemma")
         scp_cmd = ["scp", "scripts/load_gemma.py", f"{ssh_config_name}:"]
         ssh_retry(scp_cmd, created_instance_id)
@@ -510,8 +522,10 @@ def create_vast_instance(
             f"cd {repo_name} && /root/.local/bin/uv run ../load_gemma.py",
         ]
         ssh_retry(load_gemma_cmd, created_instance_id)
+    elif repo_name and not hf_token:
+        log.info("No HF_TOKEN found, skipping load_gemma step")
     else:
-        print("No repository specified, skipping load_gemma...")
+        log.info("No repository specified, skipping load_gemma...")
 
     # Copy .env file to remote repository
     if repo_name:
