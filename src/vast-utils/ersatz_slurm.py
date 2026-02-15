@@ -3,11 +3,13 @@
 
 import argparse
 import logging
+import os
 import queue
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 from setup_vast import (
     NoInstancesAvailableError,
     VastInstanceResult,
@@ -424,6 +427,9 @@ class WorkerContext:
     retry_interval: int
     instance_log_file: Path | None
     instance_log_lock: "threading.Lock | None"
+    s3_bucket: str | None
+    remote_results_dir: str | None
+    rsync_enabled: bool
 
 
 def worker_thread(ctx: WorkerContext):
@@ -593,70 +599,72 @@ def worker_thread(ctx: WorkerContext):
                     ctx.failed_jobs.append(error_msg)
 
             # Rsync results back
-            logger.info(f"[Worker {ctx.worker_id}] [{job.job_id}] Syncing results")
-            rsync_result = subprocess.run(
-                [
-                    "rsync",
-                    "-avz",
-                    "--exclude=*.safetensors",
-                    f"{instance.ssh_config_name}:TODO/eval_results/",
-                    str(job_results_dir / "eval_results"),
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            with open(log_file, "a") as f:
-                f.write(f"\n{'=' * 80}\n")
-                f.write("Rsync output:\n")
-                f.write(f"{'=' * 80}\n")
-                if rsync_result.stdout:
-                    f.write(rsync_result.stdout)
-                if rsync_result.stderr:
-                    f.write(rsync_result.stderr)
-
-            if rsync_result.returncode != 0:
-                error_msg = f"Job {job.job_id} rsync failed (return code {rsync_result.returncode})"
-                logger.error(f"[Worker {ctx.worker_id}] {error_msg}")
-                with ctx.failed_jobs_lock:
-                    ctx.failed_jobs.append(error_msg)
-
-            # Upload results to S3 from the remote instance
-            logger.info(f"[Worker {ctx.worker_id}] [{job.job_id}] Uploading to S3")
-            s3_path = f"s3://TODO-results/{ctx.timestamp}/{job.job_id}/"
-            s3_cmd = (
-                f"cd TODO && aws s3 sync eval_results/ {s3_path}"
-            )
-            s3_success = run_ssh_command(instance.ssh_config_name, s3_cmd, log_file)
-            if not s3_success:
-                error_msg = f"Job {job.job_id} S3 upload failed"
-                logger.error(f"[Worker {ctx.worker_id}] {error_msg}")
-                with ctx.failed_jobs_lock:
-                    ctx.failed_jobs.append(error_msg)
-
-            # Upload job log file to S3
-            logger.info(
-                f"[Worker {ctx.worker_id}] [{job.job_id}] Uploading job log to S3"
-            )
-            try:
-                log_upload = subprocess.run(
-                    ["aws", "s3", "cp", str(log_file), s3_path],
+            if ctx.rsync_enabled and ctx.remote_results_dir:
+                logger.info(f"[Worker {ctx.worker_id}] [{job.job_id}] Syncing results")
+                rsync_result = subprocess.run(
+                    [
+                        "rsync",
+                        "-avz",
+                        "--exclude=*.safetensors",
+                        f"{instance.ssh_config_name}:TODO/{ctx.remote_results_dir}/",
+                        str(job_results_dir / ctx.remote_results_dir),
+                    ],
                     capture_output=True,
                     text=True,
-                    timeout=60,
                 )
-                if log_upload.returncode != 0:
-                    error_msg = (
-                        f"Job {job.job_id} log S3 upload failed: {log_upload.stderr}"
-                    )
+
+                with open(log_file, "a") as f:
+                    f.write(f"\n{'=' * 80}\n")
+                    f.write("Rsync output:\n")
+                    f.write(f"{'=' * 80}\n")
+                    if rsync_result.stdout:
+                        f.write(rsync_result.stdout)
+                    if rsync_result.stderr:
+                        f.write(rsync_result.stderr)
+
+                if rsync_result.returncode != 0:
+                    error_msg = f"Job {job.job_id} rsync failed (return code {rsync_result.returncode})"
                     logger.error(f"[Worker {ctx.worker_id}] {error_msg}")
                     with ctx.failed_jobs_lock:
                         ctx.failed_jobs.append(error_msg)
-            except Exception as e:
-                error_msg = f"Job {job.job_id} log S3 upload error: {e}"
-                logger.error(f"[Worker {ctx.worker_id}] {error_msg}")
-                with ctx.failed_jobs_lock:
-                    ctx.failed_jobs.append(error_msg)
+
+            # Upload results to S3 from the remote instance
+            if ctx.s3_bucket and ctx.remote_results_dir:
+                logger.info(f"[Worker {ctx.worker_id}] [{job.job_id}] Uploading to S3")
+                s3_path = f"s3://{ctx.s3_bucket}/{ctx.timestamp}/{job.job_id}/"
+                s3_cmd = (
+                    f"cd TODO && aws s3 sync {ctx.remote_results_dir}/ {s3_path}"
+                )
+                s3_success = run_ssh_command(instance.ssh_config_name, s3_cmd, log_file)
+                if not s3_success:
+                    error_msg = f"Job {job.job_id} S3 upload failed"
+                    logger.error(f"[Worker {ctx.worker_id}] {error_msg}")
+                    with ctx.failed_jobs_lock:
+                        ctx.failed_jobs.append(error_msg)
+
+                # Upload job log file to S3
+                logger.info(
+                    f"[Worker {ctx.worker_id}] [{job.job_id}] Uploading job log to S3"
+                )
+                try:
+                    log_upload = subprocess.run(
+                        ["aws", "s3", "cp", str(log_file), s3_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    if log_upload.returncode != 0:
+                        error_msg = (
+                            f"Job {job.job_id} log S3 upload failed: {log_upload.stderr}"
+                        )
+                        logger.error(f"[Worker {ctx.worker_id}] {error_msg}")
+                        with ctx.failed_jobs_lock:
+                            ctx.failed_jobs.append(error_msg)
+                except Exception as e:
+                    error_msg = f"Job {job.job_id} log S3 upload error: {e}"
+                    logger.error(f"[Worker {ctx.worker_id}] {error_msg}")
+                    with ctx.failed_jobs_lock:
+                        ctx.failed_jobs.append(error_msg)
 
             logger.info(
                 f"[Worker {ctx.worker_id}] [{job.job_id}] Job completed, results in {job_results_dir}"
@@ -873,11 +881,48 @@ Note: version must be exactly "{YAML_VERSION}"
     parser.add_argument(
         "--results-dir",
         type=Path,
-        default=Path.home() / "projects" / "TODO_results",
-        help="Base directory for results (default: ~/projects/TODO_results/)",
+        default=None,
+        help="Local directory to rsync results to. If not provided, rsync will be skipped.",
+    )
+
+    parser.add_argument(
+        "--s3-bucket",
+        type=str,
+        default=None,
+        help="S3 bucket name for uploading results. If not provided, S3 uploads will be skipped.",
+    )
+
+    parser.add_argument(
+        "--remote-results-dir",
+        type=str,
+        default=None,
+        help="Path to results directory on remote instance (e.g., eval_results). Required if --s3-bucket or --results-dir is provided.",
     )
 
     args = parser.parse_args()
+
+    # Validate argument dependencies
+    if (args.s3_bucket or args.results_dir) and not args.remote_results_dir:
+        parser.error(
+            "--remote-results-dir is required when --s3-bucket or --results-dir is provided"
+        )
+
+    if args.s3_bucket:
+        env_file = Path(".env")
+        if env_file.exists():
+            load_dotenv(env_file)
+        if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get(
+            "AWS_SECRET_ACCESS_KEY"
+        ):
+            parser.error(
+                "--s3-bucket requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY "
+                "in .env or environment"
+            )
+
+    if not args.s3_bucket:
+        logger.warning("No --s3-bucket provided, S3 uploads will be skipped")
+    if not args.results_dir:
+        logger.warning("No --results-dir provided, local rsync will be skipped")
 
     # Load jobs
     try:
@@ -905,7 +950,12 @@ Note: version must be exactly "{YAML_VERSION}"
 
     # Create results directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_base_dir = args.results_dir
+    rsync_enabled = args.results_dir is not None
+    if args.results_dir:
+        results_base_dir = args.results_dir
+    else:
+        results_base_dir = Path(tempfile.mkdtemp(prefix="ersatz_slurm_"))
+        logger.info(f"Using temporary directory for logs: {results_base_dir}")
     results_base_dir.mkdir(parents=True, exist_ok=True)
 
     # Create instance log file for tracking created instances
@@ -922,12 +972,18 @@ Note: version must be exactly "{YAML_VERSION}"
     logger.addHandler(file_handler)
 
     logger.info(f"Git commit: {git_commit}")
-    logger.info(f"Results will be saved to: {results_base_dir / timestamp}")
+    logger.info(f"Logs will be saved to: {results_base_dir / timestamp}")
     logger.info(f"Instance IDs will be logged to: {instance_log_file}")
     logger.info(
         f"Running {len(jobs)} jobs with up to {args.max_concurrent_gpus} concurrent GPUs"
     )
     logger.info(f"GPU types: {', '.join(args.gpu_types)}")
+    if args.s3_bucket:
+        logger.info(f"S3 bucket: {args.s3_bucket}")
+    if args.results_dir:
+        logger.info(f"Results dir: {args.results_dir}")
+    if args.remote_results_dir:
+        logger.info(f"Remote results dir: {args.remote_results_dir}")
 
     # Copy YAML file to results directory
     yaml_dest = results_base_dir / timestamp / args.yaml_file.name
@@ -982,6 +1038,9 @@ Note: version must be exactly "{YAML_VERSION}"
             retry_interval=args.retry_interval,
             instance_log_file=instance_log_file,
             instance_log_lock=instance_log_lock,
+            s3_bucket=args.s3_bucket,
+            remote_results_dir=args.remote_results_dir,
+            rsync_enabled=rsync_enabled,
         )
         for i in range(num_workers)
     ]
@@ -1007,49 +1066,50 @@ Note: version must be exactly "{YAML_VERSION}"
     monitor_thread.join(timeout=10)
 
     # Upload log files to S3
-    logger.info("\\nUploading log files to S3...")
-    s3_logs_path = f"s3://TODO-results/{timestamp}/"
-    try:
-        # Upload ersatz_slurm.log
-        log_upload = subprocess.run(
-            ["aws", "s3", "cp", str(log_file), s3_logs_path],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if log_upload.returncode == 0:
-            logger.info(f"Uploaded ersatz_slurm.log to {s3_logs_path}")
-        else:
-            logger.error(f"Failed to upload ersatz_slurm.log: {log_upload.stderr}")
-
-        # Upload vast_instances.txt
-        instances_upload = subprocess.run(
-            ["aws", "s3", "cp", str(instance_log_file), s3_logs_path],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if instances_upload.returncode == 0:
-            logger.info(f"Uploaded vast_instances.txt to {s3_logs_path}")
-        else:
-            logger.error(
-                f"Failed to upload vast_instances.txt: {instances_upload.stderr}"
-            )
-
-        # Upload YAML file if it was copied successfully
-        if yaml_copied:
-            yaml_upload = subprocess.run(
-                ["aws", "s3", "cp", str(yaml_dest), s3_logs_path],
+    if args.s3_bucket:
+        logger.info("\nUploading log files to S3...")
+        s3_logs_path = f"s3://{args.s3_bucket}/{timestamp}/"
+        try:
+            # Upload ersatz_slurm.log
+            log_upload = subprocess.run(
+                ["aws", "s3", "cp", str(log_file), s3_logs_path],
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
-            if yaml_upload.returncode == 0:
-                logger.info(f"Uploaded {args.yaml_file.name} to {s3_logs_path}")
+            if log_upload.returncode == 0:
+                logger.info(f"Uploaded ersatz_slurm.log to {s3_logs_path}")
             else:
-                logger.error(f"Failed to upload YAML file: {yaml_upload.stderr}")
-    except Exception as e:
-        logger.error(f"Error uploading logs to S3: {e}")
+                logger.error(f"Failed to upload ersatz_slurm.log: {log_upload.stderr}")
+
+            # Upload vast_instances.txt
+            instances_upload = subprocess.run(
+                ["aws", "s3", "cp", str(instance_log_file), s3_logs_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if instances_upload.returncode == 0:
+                logger.info(f"Uploaded vast_instances.txt to {s3_logs_path}")
+            else:
+                logger.error(
+                    f"Failed to upload vast_instances.txt: {instances_upload.stderr}"
+                )
+
+            # Upload YAML file if it was copied successfully
+            if yaml_copied:
+                yaml_upload = subprocess.run(
+                    ["aws", "s3", "cp", str(yaml_dest), s3_logs_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if yaml_upload.returncode == 0:
+                    logger.info(f"Uploaded {args.yaml_file.name} to {s3_logs_path}")
+                else:
+                    logger.error(f"Failed to upload YAML file: {yaml_upload.stderr}")
+        except Exception as e:
+            logger.error(f"Error uploading logs to S3: {e}")
 
     # Destroy all instances created during this run
     logger.info("\nDestroying all instances created during this run...")
