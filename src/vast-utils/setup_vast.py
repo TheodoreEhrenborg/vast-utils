@@ -520,12 +520,13 @@ def create_vast_instance(
         scp_cmd = ["scp", "src/vast-utils/load_gemma.py", f"{ssh_config_name}:"]
         ssh_retry(scp_cmd, created_instance_id)
 
+        # Maybe we should just clone this repo and use uv run?
         load_gemma_cmd = [
             "ssh",
             "-o",
             "StrictHostKeyChecking=no",
             ssh_config_name,
-            "/root/.local/bin/uv run --with transformers --with torch load_gemma.py",
+            "/root/.local/bin/uv run --with transformers --with torch --with accelerate load_gemma.py",
         ]
         ssh_retry(load_gemma_cmd, created_instance_id)
     else:
