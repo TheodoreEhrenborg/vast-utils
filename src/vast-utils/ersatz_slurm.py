@@ -231,6 +231,8 @@ def create_single_instance(
     gpu_types: list[str],
     min_driver_version: str,
     retry_interval: int,
+    repo_user: str | None = None,
+    repo_name: str | None = None,
     instance_log_file: Path | None = None,
     instance_log_lock=None,
     ctx: "WorkerContext | None" = None,
@@ -244,6 +246,8 @@ def create_single_instance(
         gpu_types: List of acceptable GPU types.
         min_driver_version: Minimum GPU driver version.
         retry_interval: Seconds to wait between GPU spawn retries.
+        repo_user: GitHub username for repository to clone.
+        repo_name: GitHub repository name to clone.
         instance_log_file: Path to file for logging created instance IDs.
         instance_log_lock: Lock for thread-safe writes to instance_log_file.
         ctx: WorkerContext to check if all jobs are completed.
@@ -259,6 +263,8 @@ def create_single_instance(
                 )
                 instance = create_vast_instance(
                     gpu_type=gpu_type,
+                    repo_user=repo_user,
+                    repo_name=repo_name,
                     min_driver_version=min_driver_version,
                     full_ssh_name=True,
                     instance_log_file=instance_log_file,
@@ -332,13 +338,20 @@ def create_single_instance(
         time.sleep(retry_interval)
 
 
-def prepare_instance_for_next_job(instance: VastInstanceResult, log_file: Path) -> bool:
+def prepare_instance_for_next_job(
+    instance: VastInstanceResult,
+    log_file: Path,
+    repo_user: str,
+    repo_name: str,
+) -> bool:
     """
     Prepare an instance for the next job by cleaning up and re-cloning.
 
     Args:
         instance: Instance to prepare.
         log_file: Path to log file for this operation.
+        repo_user: GitHub username for repository.
+        repo_name: GitHub repository name.
 
     Returns:
         True if preparation succeeded, False otherwise.
@@ -346,13 +359,13 @@ def prepare_instance_for_next_job(instance: VastInstanceResult, log_file: Path) 
     logger.info(f"[{instance.ssh_config_name}] Preparing instance for next job")
 
     # Remove the repository
-    cleanup_cmd = "rm -rf TODO"
+    cleanup_cmd = f"rm -rf {repo_name}"
     if not run_ssh_command(instance.ssh_config_name, cleanup_cmd, log_file):
         logger.error(f"[{instance.ssh_config_name}] Failed to cleanup repository")
         return False
 
     # Re-clone the repository
-    clone_cmd = "gh repo clone TODO/TODO"
+    clone_cmd = f"gh repo clone {repo_user}/{repo_name}"
     if not run_ssh_command(instance.ssh_config_name, clone_cmd, log_file):
         logger.error(f"[{instance.ssh_config_name}] Failed to re-clone repository")
         return False
@@ -363,7 +376,7 @@ def prepare_instance_for_next_job(instance: VastInstanceResult, log_file: Path) 
             [
                 "scp",
                 ".env",
-                f"{instance.ssh_config_name}:TODO/.env",
+                f"{instance.ssh_config_name}:{repo_name}/.env",
             ],
             capture_output=True,
             text=True,
@@ -430,6 +443,8 @@ class WorkerContext:
     s3_bucket: str | None
     remote_results_dir: str | None
     rsync_enabled: bool
+    repo_user: str | None
+    repo_name: str | None
 
 
 def worker_thread(ctx: WorkerContext):
@@ -464,6 +479,8 @@ def worker_thread(ctx: WorkerContext):
                     gpu_types=ctx.gpu_types,
                     min_driver_version=ctx.min_driver_version,
                     retry_interval=ctx.retry_interval,
+                    repo_user=ctx.repo_user,
+                    repo_name=ctx.repo_name,
                     instance_log_file=ctx.instance_log_file,
                     instance_log_lock=ctx.instance_log_lock,
                     ctx=ctx,
@@ -525,7 +542,7 @@ def worker_thread(ctx: WorkerContext):
                 logger.info(
                     f"[Worker {ctx.worker_id}] [{job.job_id}] Running setup command"
                 )
-                setup_cmd = f"cd TODO && {ctx.setup_command}"
+                setup_cmd = f"cd {ctx.repo_name} && {ctx.setup_command}"
                 setup_success = run_ssh_command(
                     instance.ssh_config_name, setup_cmd, log_file
                 )
@@ -561,7 +578,7 @@ def worker_thread(ctx: WorkerContext):
 
             # Execute job commands
             logger.info(f"[Worker {ctx.worker_id}] [{job.job_id}] Executing script")
-            commands = f"cd TODO && {job.script}"
+            commands = f"cd {ctx.repo_name} && {job.script}"
             success = run_ssh_command(instance.ssh_config_name, commands, log_file)
 
             if success:
@@ -606,7 +623,7 @@ def worker_thread(ctx: WorkerContext):
                         "rsync",
                         "-avz",
                         "--exclude=*.safetensors",
-                        f"{instance.ssh_config_name}:TODO/{ctx.remote_results_dir}/",
+                        f"{instance.ssh_config_name}:{ctx.repo_name}/{ctx.remote_results_dir}/",
                         str(job_results_dir / ctx.remote_results_dir),
                     ],
                     capture_output=True,
@@ -633,7 +650,7 @@ def worker_thread(ctx: WorkerContext):
                 logger.info(f"[Worker {ctx.worker_id}] [{job.job_id}] Uploading to S3")
                 s3_path = f"s3://{ctx.s3_bucket}/{ctx.timestamp}/{job.job_id}/"
                 s3_cmd = (
-                    f"cd TODO && aws s3 sync {ctx.remote_results_dir}/ {s3_path}"
+                    f"cd {ctx.repo_name} && aws s3 sync {ctx.remote_results_dir}/ {s3_path}"
                 )
                 s3_success = run_ssh_command(instance.ssh_config_name, s3_cmd, log_file)
                 if not s3_success:
@@ -674,7 +691,7 @@ def worker_thread(ctx: WorkerContext):
             logger.info(
                 f"[Worker {ctx.worker_id}] [{job.job_id}] Preparing instance for reuse"
             )
-            if not prepare_instance_for_next_job(instance, log_file):
+            if not prepare_instance_for_next_job(instance, log_file, ctx.repo_user, ctx.repo_name):
                 error_msg = f"Job {job.job_id} failed to prepare instance {instance.instance_id} for reuse"
                 logger.error(f"[Worker {ctx.worker_id}] {error_msg}")
                 with ctx.failed_jobs_lock:
@@ -850,6 +867,13 @@ Note: version must be exactly "{YAML_VERSION}"
     )
 
     parser.add_argument(
+        "--repo",
+        type=str,
+        required=True,
+        help="GitHub repository in format user/repo-name",
+    )
+
+    parser.add_argument(
         "--gpu-types",
         type=str,
         nargs="+",
@@ -900,6 +924,11 @@ Note: version must be exactly "{YAML_VERSION}"
     )
 
     args = parser.parse_args()
+
+    # Parse repository
+    if "/" not in args.repo:
+        parser.error("--repo must be in format user/repo-name")
+    repo_user, repo_name = args.repo.split("/", 1)
 
     # Validate argument dependencies
     if (args.s3_bucket or args.results_dir) and not args.remote_results_dir:
@@ -1041,6 +1070,8 @@ Note: version must be exactly "{YAML_VERSION}"
             s3_bucket=args.s3_bucket,
             remote_results_dir=args.remote_results_dir,
             rsync_enabled=rsync_enabled,
+            repo_user=repo_user,
+            repo_name=repo_name,
         )
         for i in range(num_workers)
     ]
