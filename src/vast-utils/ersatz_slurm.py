@@ -370,32 +370,6 @@ def prepare_instance_for_next_job(
         logger.error(f"[{instance.ssh_config_name}] Failed to re-clone repository")
         return False
 
-    # Copy .env file to repository
-    try:
-        result = subprocess.run(
-            [
-                "scp",
-                ".env",
-                f"{instance.ssh_config_name}:{repo_name}/.env",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            logger.error(f"[{instance.ssh_config_name}] Failed to copy .env file")
-            with open(log_file, "a") as f:
-                f.write(f"\n{'=' * 80}\n")
-                f.write("SCP .env failed:\n")
-                f.write(f"{'=' * 80}\n")
-                if result.stdout:
-                    f.write(result.stdout)
-                if result.stderr:
-                    f.write(result.stderr)
-            return False
-    except Exception as e:
-        logger.error(f"[{instance.ssh_config_name}] Exception copying .env: {e}")
-        return False
-
     logger.info(f"[{instance.ssh_config_name}] Instance prepared for next job")
     return True
 

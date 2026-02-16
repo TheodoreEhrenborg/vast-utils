@@ -527,13 +527,6 @@ def create_vast_instance(
     else:
         log.info("No repository specified, skipping load_gemma...")
 
-    # Copy .env file to remote repository
-    if repo_name:
-        print("Copying .env to remote repository...")
-        copy_env_cmd = ["scp", ".env", f"{ssh_config_name}:{repo_name}/.env"]
-        ssh_retry(copy_env_cmd, created_instance_id)
-    else:
-        print("No repository specified, skipping .env copy...")
 
     # Copy pingme script if it exists locally
     pingme_path = Path.home() / ".local" / "bin" / "pingme"
