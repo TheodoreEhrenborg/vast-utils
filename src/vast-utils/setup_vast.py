@@ -515,7 +515,7 @@ def create_vast_instance(
 
     # Load gemma
     hf_token = os.environ.get("HF_TOKEN")
-    if repo_name and hf_token:
+    if hf_token:
         print("Load gemma")
         scp_cmd = ["scp", "scripts/load_gemma.py", f"{ssh_config_name}:"]
         ssh_retry(scp_cmd, created_instance_id)
@@ -528,10 +528,8 @@ def create_vast_instance(
             "/root/.local/bin/uv run --with transformers --with torch load_gemma.py",
         ]
         ssh_retry(load_gemma_cmd, created_instance_id)
-    elif repo_name and not hf_token:
-        log.info("No HF_TOKEN found, skipping load_gemma step")
     else:
-        log.info("No repository specified, skipping load_gemma...")
+        log.info("No HF_TOKEN found, skipping load_gemma step")
 
 
     # Copy pingme script if it exists locally
