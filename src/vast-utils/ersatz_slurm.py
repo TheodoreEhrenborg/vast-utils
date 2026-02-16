@@ -343,6 +343,7 @@ def prepare_instance_for_next_job(
     log_file: Path,
     repo_user: str,
     repo_name: str,
+    use_gh_for_clone: bool,
 ) -> bool:
     """
     Prepare an instance for the next job by cleaning up and re-cloning.
@@ -352,6 +353,7 @@ def prepare_instance_for_next_job(
         log_file: Path to log file for this operation.
         repo_user: GitHub username for repository.
         repo_name: GitHub repository name.
+        use_gh_for_clone: Whether to use gh (if authenticated) or git clone.
 
     Returns:
         True if preparation succeeded, False otherwise.
@@ -365,7 +367,11 @@ def prepare_instance_for_next_job(
         return False
 
     # Re-clone the repository
-    clone_cmd = f"gh repo clone {repo_user}/{repo_name}"
+    if use_gh_for_clone:
+        clone_cmd = f"gh repo clone {repo_user}/{repo_name}"
+    else:
+        clone_cmd = f"git clone https://github.com/{repo_user}/{repo_name}.git"
+
     if not run_ssh_command(instance.ssh_config_name, clone_cmd, log_file):
         logger.error(f"[{instance.ssh_config_name}] Failed to re-clone repository")
         return False
@@ -419,6 +425,7 @@ class WorkerContext:
     rsync_enabled: bool
     repo_user: str | None
     repo_name: str | None
+    use_gh_for_clone: bool
 
 
 def worker_thread(ctx: WorkerContext):
@@ -665,7 +672,9 @@ def worker_thread(ctx: WorkerContext):
             logger.info(
                 f"[Worker {ctx.worker_id}] [{job.job_id}] Preparing instance for reuse"
             )
-            if not prepare_instance_for_next_job(instance, log_file, ctx.repo_user, ctx.repo_name):
+            if not prepare_instance_for_next_job(
+                instance, log_file, ctx.repo_user, ctx.repo_name, ctx.use_gh_for_clone
+            ):
                 error_msg = f"Job {job.job_id} failed to prepare instance {instance.instance_id} for reuse"
                 logger.error(f"[Worker {ctx.worker_id}] {error_msg}")
                 with ctx.failed_jobs_lock:
@@ -904,6 +913,11 @@ Note: version must be exactly "{YAML_VERSION}"
         parser.error("--repo must be in format user/repo-name")
     repo_user, repo_name = args.repo.split("/", 1)
 
+    # Load .env file if it exists
+    env_file = Path(".env")
+    if env_file.exists():
+        load_dotenv(env_file)
+
     # Validate argument dependencies
     if (args.s3_bucket or args.results_dir) and not args.remote_results_dir:
         parser.error(
@@ -911,9 +925,6 @@ Note: version must be exactly "{YAML_VERSION}"
         )
 
     if args.s3_bucket:
-        env_file = Path(".env")
-        if env_file.exists():
-            load_dotenv(env_file)
         if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get(
             "AWS_SECRET_ACCESS_KEY"
         ):
@@ -1021,6 +1032,13 @@ Note: version must be exactly "{YAML_VERSION}"
     failed_jobs_lock = threading.Lock()
     instance_log_lock = threading.Lock()
 
+    # Check if GitHub token is available for using gh CLI
+    use_gh_for_clone = bool(os.environ.get("GITHUB_TOKEN"))
+    if use_gh_for_clone:
+        logger.info("GITHUB_TOKEN found, will use 'gh repo clone' for cloning")
+    else:
+        logger.info("No GITHUB_TOKEN found, will use 'git clone' for public repos")
+
     # Create worker contexts
     num_workers = min(args.max_concurrent_gpus, len(jobs))
     worker_contexts = [
@@ -1046,6 +1064,7 @@ Note: version must be exactly "{YAML_VERSION}"
             rsync_enabled=rsync_enabled,
             repo_user=repo_user,
             repo_name=repo_name,
+            use_gh_for_clone=use_gh_for_clone,
         )
         for i in range(num_workers)
     ]

@@ -467,12 +467,18 @@ def create_vast_instance(
     # Clone repository
     if repo_user and repo_name:
         print(f"Cloning repository {repo_user}/{repo_name}...")
+        # Use gh if authenticated, otherwise use git clone for public repos
+        if github_token:
+            clone_command = f"gh repo clone {repo_user}/{repo_name}"
+        else:
+            clone_command = f"git clone https://github.com/{repo_user}/{repo_name}.git"
+
         clone_cmd = [
             "ssh",
             "-o",
             "StrictHostKeyChecking=no",
             ssh_config_name,
-            f"gh repo clone {repo_user}/{repo_name}",
+            clone_command,
         ]
         ssh_retry(clone_cmd, created_instance_id)
     else:
