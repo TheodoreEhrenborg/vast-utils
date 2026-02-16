@@ -517,7 +517,7 @@ def create_vast_instance(
     hf_token = os.environ.get("HF_TOKEN")
     if hf_token:
         print("Load gemma")
-        scp_cmd = ["scp", "scripts/load_gemma.py", f"{ssh_config_name}:"]
+        scp_cmd = ["scp", "src/vast-utils/load_gemma.py", f"{ssh_config_name}:"]
         ssh_retry(scp_cmd, created_instance_id)
 
         load_gemma_cmd = [
