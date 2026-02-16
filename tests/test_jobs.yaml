@@ -1,0 +1,17 @@
+version: "0.2"
+setup: |
+  echo "Running setup command"
+jobs:
+  - job_id: test_job_1
+    script: |
+      hostname
+      mkdir -p eval_results
+      touch eval_results/test_job_1_output.txt
+      echo "Test job 1 completed on $(hostname)" > eval_results/test_job_1_output.txt
+
+  - job_id: test_job_2
+    script: |
+      hostname
+      mkdir -p eval_results
+      touch eval_results/test_job_2_output.txt
+      echo "Test job 2 completed on $(hostname)" > eval_results/test_job_2_output.txt
