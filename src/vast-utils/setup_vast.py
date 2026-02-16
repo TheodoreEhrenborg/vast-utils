@@ -519,7 +519,7 @@ def create_vast_instance(
             "-o",
             "StrictHostKeyChecking=no",
             ssh_config_name,
-            f"cd {repo_name} && /root/.local/bin/uv run ../load_gemma.py",
+            "/root/.local/bin/uv run --with transformers --with torch load_gemma.py",
         ]
         ssh_retry(load_gemma_cmd, created_instance_id)
     elif repo_name and not hf_token:
